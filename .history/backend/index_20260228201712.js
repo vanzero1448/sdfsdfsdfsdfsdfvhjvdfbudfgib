@@ -541,7 +541,6 @@ app.get("/payment-info/:invId", (req, res) => {
 
 // ── Telegram webhook ───────────────────────────────────
 app.post("/telegram/webhook", async (req, res) => {
-  console.log("🔍 FULL WEBHOOK UPDATE:", JSON.stringify(req.body, null, 2));
   res.sendStatus(200); // always respond immediately
 
   const cbq = req.body?.callback_query;
