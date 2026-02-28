@@ -3,6 +3,9 @@ const { Rcon } = require("rcon-client");
 const crypto = require("crypto");
 const app = express();
 
+const cors = require("cors");
+app.use(cors({ origin: "*" })); // на проде потом заменишь на URL фронта
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
