@@ -695,7 +695,7 @@ app.post("/telegram/webhook", async (req, res) => {
     }
     try {
       const reason = "Pending investigation";
-      await sendRcon([`ban ${p.nick}`]);
+      await sendRcon([`ban ${p.nick} ${reason}`]);
       p.banned = true;
       await updatePurchaseMessage(p);
       await alertCallback(cbq.id, `🚫 ${p.nick} banned.\nReason: ${reason}`);
@@ -712,7 +712,7 @@ app.post("/telegram/webhook", async (req, res) => {
       return;
     }
     try {
-      await sendRcon([`unban ${p.nick}`]);
+      await sendRcon([`pardon ${p.nick}`]);
       p.banned = false;
       await updatePurchaseMessage(p);
       await alertCallback(cbq.id, `✅ ${p.nick} unbanned.`);

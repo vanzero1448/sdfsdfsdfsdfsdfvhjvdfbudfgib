@@ -13,55 +13,6 @@ const https = require("https");
 const app = express();
 
 // ┌─────────────────────────────────────────────────────┐
-// │                 CURRENCY CONVERTER                  │
-// └─────────────────────────────────────────────────────┘
-let cachedRate = null;
-let cachedRateTime = 0;
-const CACHE_TTL_MS = 60 * 60 * 1000; // refresh every hour
-
-async function getUsdToRub() {
-  if (cachedRate && Date.now() - cachedRateTime < CACHE_TTL_MS) {
-    return cachedRate;
-  }
-  return new Promise((resolve) => {
-    https
-      .get("https://www.cbr-xml-daily.ru/daily_json.js", (res) => {
-        let raw = "";
-        res.on("data", (d) => (raw += d));
-        res.on("end", () => {
-          try {
-            const data = JSON.parse(raw);
-            const rate = data?.Valute?.USD?.Value;
-            if (rate) {
-              cachedRate = rate;
-              cachedRateTime = Date.now();
-              console.log(`💱  USD/RUB rate updated: ${rate}`);
-              resolve(rate);
-            } else {
-              console.warn("⚠️  CBR rate not found, using fallback 90");
-              resolve(cachedRate ?? 90);
-            }
-          } catch (e) {
-            console.warn(
-              `⚠️  CBR parse error: ${e.message}, using fallback 90`,
-            );
-            resolve(cachedRate ?? 90);
-          }
-        });
-      })
-      .on("error", (e) => {
-        console.warn(`⚠️  CBR request failed: ${e.message}, using fallback 90`);
-        resolve(cachedRate ?? 90);
-      });
-  });
-}
-
-async function usdToRub(usd) {
-  const rate = await getUsdToRub();
-  return Math.ceil(parseFloat(usd) * rate); // round UP — копейки Robokassa не любит
-}
-
-// ┌─────────────────────────────────────────────────────┐
 // │                   ENV VALIDATION                    │
 // └─────────────────────────────────────────────────────┘
 const REQUIRED_ENV = [
@@ -478,24 +429,10 @@ app.get("/health", (_req, res) =>
   }),
 );
 
-// ── Current USD/RUB rate ───────────────────────────────
-app.get("/rate", async (_req, res) => {
-  try {
-    const rate = await getUsdToRub();
-    res.json({
-      rate,
-      cached: cachedRateTime > 0,
-      updatedAt: new Date(cachedRateTime).toISOString(),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // ── Create payment link ────────────────────────────────
-app.post("/create-payment", payLimiter, async (req, res, next) => {
+app.post("/create-payment", payLimiter, (req, res, next) => {
   try {
-    const { nick, itemId, itemType, price, currency = "USD" } = req.body;
+    const { nick, itemId, itemType, price } = req.body;
 
     if (!nick || !itemId || !itemType || !price)
       return res.status(400).json({ error: "Missing required fields." });
@@ -510,13 +447,8 @@ app.post("/create-payment", payLimiter, async (req, res, next) => {
     if (!cmds.length)
       return res.status(400).json({ error: "Unknown item or type." });
 
-    // Convert to RUB if price is in USD
-    const priceUsd = parseFloat(price);
-    const priceRub = currency === "RUB" ? priceUsd : await usdToRub(priceUsd);
-
-    const rate = currency === "RUB" ? null : await getUsdToRub();
     const invId = Math.floor(Date.now() / 1000);
-    const sum = priceRub.toFixed(2);
+    const sum = parseFloat(price).toFixed(2);
     const desc = `${buildItemLabel(itemId, itemType)} for ${nick}`;
 
     const sigStr = `${MERCHANT}:${sum}:${invId}:${PASS1}:shp_item=${itemId}:shp_nick=${nick}:shp_type=${itemType}`;
@@ -535,13 +467,7 @@ app.post("/create-payment", payLimiter, async (req, res, next) => {
     url.searchParams.set("FailURL", `${SITE_URL}/fail`);
     if (IS_TEST) url.searchParams.set("IsTest", "1");
 
-    res.json({
-      url: url.toString(),
-      invId,
-      priceUsd: currency === "RUB" ? null : priceUsd,
-      priceRub,
-      rate,
-    });
+    res.json({ url: url.toString(), invId });
   } catch (err) {
     next(err);
   }
@@ -595,7 +521,7 @@ app.post("/robokassa/result", resLimiter, async (req, res, next) => {
       itemId: shp_item,
       itemType: shp_type,
       itemLabel: buildItemLabel(shp_item, shp_type),
-      price: parseFloat(OutSum).toFixed(2), // RUB
+      price: parseFloat(OutSum).toFixed(2),
       rankName,
       dateStr: formatDate(),
       revoked: false,
@@ -695,7 +621,7 @@ app.post("/telegram/webhook", async (req, res) => {
     }
     try {
       const reason = "Pending investigation";
-      await sendRcon([`ban ${p.nick}`]);
+      await sendRcon([`ban ${p.nick} `]);
       p.banned = true;
       await updatePurchaseMessage(p);
       await alertCallback(cbq.id, `🚫 ${p.nick} banned.\nReason: ${reason}`);
