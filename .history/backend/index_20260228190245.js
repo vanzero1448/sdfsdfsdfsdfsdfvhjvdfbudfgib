@@ -10,10 +10,12 @@ const https = require("https");
 const app = express();
 
 // ═══════════════════════════════════════════════
-// SECURITY & CORS (исправлено по best practices 2026)
+// SECURITY & CORS
 // ═══════════════════════════════════════════════
 app.use(helmet());
-app.set("trust proxy", 1); // Для Render — достаточно 1 (или 3 при проблемах с IP)
+
+// ДОБАВЛЕНО: Доверяем прокси-серверу Render (исправляет ошибку X-Forwarded-For)
+app.set("trust proxy", 1);
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -23,10 +25,13 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      if (
+        !origin ||
+        ALLOWED_ORIGINS.includes(origin) ||
+        process.env.SITE_URL.includes(origin)
+      ) {
         cb(null, true);
       } else {
-        console.warn(`🚫 CORS rejected origin: ${origin}`);
         cb(new Error("CORS: origin not allowed"));
       }
     },
@@ -52,7 +57,7 @@ const resLimiter = rateLimit({
 });
 
 // ═══════════════════════════════════════════════
-// ENV VALIDATION (добавлен ALLOWED_ORIGINS)
+// ENV VALIDATION
 // ═══════════════════════════════════════════════
 const REQUIRED_ENV = [
   "ROBOKASSA_MERCHANT_LOGIN",
@@ -63,7 +68,6 @@ const REQUIRED_ENV = [
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_CHAT_ID",
   "SITE_URL",
-  "ALLOWED_ORIGINS", // ← обязательно!
 ];
 
 for (const k of REQUIRED_ENV) {
@@ -83,6 +87,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SITE_URL = process.env.SITE_URL.replace(/\/$/, "");
 const SERVER_IP = "pixel.my-craft.cc:25612";
 
+// ДОБАВЛЕНО: Парсим несколько ID админов, разделенных запятой
 const ADMIN_CHATS = (process.env.TELEGRAM_CHAT_ID || "")
   .split(",")
   .map((id) => id.trim())
@@ -91,7 +96,7 @@ const ADMIN_CHATS = (process.env.TELEGRAM_CHAT_ID || "")
 const purchases = new Map();
 
 // ═══════════════════════════════════════════════
-// COMMAND BUILDER (без изменений — работает идеально)
+// COMMAND BUILDER
 // ═══════════════════════════════════════════════
 const VALID_RANKS = new Set([
   "ping",
@@ -236,8 +241,10 @@ function buildPurchaseCaption(p) {
   ].join("\n");
 }
 
+// ИЗМЕНЕНО: Отправка уведомлений ВСЕМ админам
 async function sendPurchaseNotification(p) {
   const sentMessages = [];
+
   for (const chatId of ADMIN_CHATS) {
     try {
       const res = await telegramRequest("sendMessage", {
@@ -257,6 +264,7 @@ async function sendPurchaseNotification(p) {
               ],
             },
       });
+
       if (res?.result?.message_id) {
         sentMessages.push({ chatId, msgId: res.result.message_id });
       }
@@ -264,17 +272,9 @@ async function sendPurchaseNotification(p) {
       console.warn(`TG send error to ${chatId}:`, e.message);
     }
   }
+
   return sentMessages;
 }
-
-// ═══════════════════════════════════════════════
-// GLOBAL ERROR HANDLER (главное исправление!)
-// ═══════════════════════════════════════════════
-const errorHandler = (err, req, res, next) => {
-  console.error(`❌ Unhandled error:`, err.message);
-  if (res.headersSent) return next(err);
-  res.status(500).json({ error: "Internal server error. Check server logs." });
-};
 
 // ═══════════════════════════════════════════════
 // ROUTES
@@ -282,44 +282,42 @@ const errorHandler = (err, req, res, next) => {
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
 app.post("/create-payment", payLimiter, (req, res) => {
-  try {
-    const { nick, itemId, itemType, price } = req.body;
+  const { nick, itemId, itemType, price } = req.body;
 
-    if (!nick || !itemId || !itemType || !price)
-      return res.status(400).json({ error: "Missing fields" });
-    if (!isValidNick(nick))
-      return res.status(400).json({ error: "Invalid nickname" });
-    if (!isValidSum(price))
-      return res.status(400).json({ error: "Invalid price" });
+  if (!nick || !itemId || !itemType || !price)
+    return res.status(400).json({ error: "Missing fields" });
+  if (!isValidNick(nick))
+    return res.status(400).json({ error: "Invalid nickname" });
+  if (!isValidSum(price))
+    return res.status(400).json({ error: "Invalid price" });
 
-    const { cmds } = buildCommands(itemId, itemType, nick);
-    if (!cmds.length)
-      return res.status(400).json({ error: "Unknown item or type" });
+  const { cmds } = buildCommands(itemId, itemType, nick);
+  if (!cmds.length)
+    return res.status(400).json({ error: "Unknown item or type" });
 
-    const invId = Math.floor(Date.now() / 1000);
-    const sum = parseFloat(price).toFixed(2);
-    const desc = `${buildItemLabel(itemId, itemType)} for ${nick}`;
+  const invId = Math.floor(Date.now() / 1000);
+  const sum = parseFloat(price).toFixed(2);
+  const desc = `${buildItemLabel(itemId, itemType)} for ${nick}`;
 
-    const sigStr = `${MERCHANT}:${sum}:${invId}:${PASS1}:shp_item=${itemId}:shp_nick=${nick}:shp_type=${itemType}`;
-    const sig = crypto.createHash("md5").update(sigStr).digest("hex");
+  const sigStr = `${MERCHANT}:${sum}:${invId}:${PASS1}:shp_item=${itemId}:shp_nick=${nick}:shp_type=${itemType}`;
+  const sig = crypto.createHash("md5").update(sigStr).digest("hex");
 
-    const url = new URL("https://auth.robokassa.ru/Merchant/Index.aspx");
-    url.searchParams.set("MrchLogin", MERCHANT);
-    url.searchParams.set("OutSum", sum);
-    url.searchParams.set("InvId", String(invId));
-    url.searchParams.set("Desc", desc);
-    url.searchParams.set("SignatureValue", sig);
-    url.searchParams.set("shp_item", itemId);
-    url.searchParams.set("shp_nick", nick);
-    url.searchParams.set("shp_type", itemType);
-    url.searchParams.set("SuccessURL", `${SITE_URL}/success`);
-    url.searchParams.set("FailURL", `${SITE_URL}/fail`);
+  const url = new URL("https://auth.robokassa.ru/Merchant/Index.aspx");
+  url.searchParams.set("MrchLogin", MERCHANT);
+  url.searchParams.set("OutSum", sum);
+  url.searchParams.set("InvId", String(invId));
+  url.searchParams.set("Desc", desc);
+  url.searchParams.set("SignatureValue", sig);
+  url.searchParams.set("shp_item", itemId);
+  url.searchParams.set("shp_nick", nick);
+  url.searchParams.set("shp_type", itemType);
+  url.searchParams.set("SuccessURL", `${SITE_URL}/success`);
+  url.searchParams.set("FailURL", `${SITE_URL}/fail`);
 
-    res.json({ url: url.toString(), invId });
-  } catch (err) {
-    console.error("Create payment error:", err);
-    throw err; // попадёт в глобальный обработчик
-  }
+  // Раскомментируйте строку ниже для тестов
+  // url.searchParams.set("IsTest", "1");
+
+  res.json({ url: url.toString(), invId });
 });
 
 app.post("/robokassa/result", resLimiter, async (req, res) => {
@@ -366,7 +364,7 @@ app.post("/robokassa/result", resLimiter, async (req, res) => {
     rankName,
     dateStr: new Date().toLocaleString(),
     revoked: false,
-    tgMsgs: [],
+    tgMsgs: [], // Массив для хранения ID сообщений у всех админов
   };
   purchases.set(String(InvId), p);
 
@@ -403,6 +401,7 @@ app.post("/telegram/webhook", async (req, res) => {
       await sendRcon(buildRevokeCommands(p));
       p.revoked = true;
 
+      // ИЗМЕНЕНО: Обновляем сообщение у ВСЕХ админов
       for (const msg of p.tgMsgs) {
         await telegramRequest("editMessageText", {
           chat_id: msg.chatId,
@@ -423,11 +422,6 @@ app.post("/telegram/webhook", async (req, res) => {
     }
   }
 });
-
-// ═══════════════════════════════════════════════
-// REGISTER ERROR HANDLER (после всех роутов!)
-// ═══════════════════════════════════════════════
-app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
