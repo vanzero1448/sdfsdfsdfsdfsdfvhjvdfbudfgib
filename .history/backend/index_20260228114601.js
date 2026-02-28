@@ -1,32 +1,29 @@
 const express = require("express");
 const { Rcon } = require("rcon-client");
 const crypto = require("crypto");
-const cors = require("cors");
-
 const app = express();
-app.use(cors({ origin: "*" }));
+
+const cors = require("cors");
+app.use(cors({ origin: "*" })); // на проде потом заменишь на URL фронта
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const MERCHANT_LOGIN = process.env.ROBOKASSA_MERCHANT_LOGIN;
-const PASSWORD1 = process.env.ROBOKASSA_PASSWORD1;
-const PASSWORD2 = process.env.ROBOKASSA_PASSWORD2; // Для проверки успешной оплаты нужен Пароль #2
-
+const PASSWORD1 = process.env.ROBOKASSA_PASSWORD1; // Result
 const HYRCON_HOST = process.env.HYRCON_HOST;
 const HYRCON_PORT = parseInt(process.env.HYRCON_PORT || "25575");
 const HYRCON_PASS = process.env.HYRCON_PASSWORD;
 
-// === 1. Создание ссылки на оплату ===
+// === 1. Создание ссылки на оплату (вызывай из фронта) ===
 app.post("/create-payment", async (req, res) => {
-  const { nick, rank, sum } = req.body;
+  const { nick, rank, sum } = req.body; // nick — ник игрока, rank — например "vip"
   const orderId = Date.now();
-  const description = `Донат ${rank} для ${nick}`;
 
-  // ВАЖНО: кастомные параметры shp_ должны быть в подписи в алфавитном порядке!
-  const signatureString = `${MERCHANT_LOGIN}:${sum}:${orderId}:${PASSWORD1}:shp_nick=${nick}:shp_rank=${rank}`;
+  const description = `Донат ${rank} для ${nick}`;
   const signature = crypto
     .createHash("md5")
-    .update(signatureString)
+    .update(`${MERCHANT_LOGIN}:${sum}:${orderId}:${PASSWORD1}`)
     .digest("hex");
 
   const paymentUrl =
@@ -42,16 +39,15 @@ app.post("/create-payment", async (req, res) => {
 app.post("/robokassa/result", async (req, res) => {
   const { InvId, OutSum, SignatureValue, shp_nick, shp_rank } = req.body;
 
-  // ВАЖНО: Для Result используется PASSWORD2 и тоже добавляются shp_ параметры
-  const signatureString = `${OutSum}:${InvId}:${PASSWORD2}:shp_nick=${shp_nick}:shp_rank=${shp_rank}`;
+  // Проверка подписи
   const mySig = crypto
     .createHash("md5")
-    .update(signatureString)
+    .update(`${OutSum}:${InvId}:${PASSWORD1}`)
     .digest("hex")
     .toUpperCase();
 
   if (mySig !== SignatureValue.toUpperCase()) {
-    return res.status(400).send("bad sign");
+    return res.send("bad sign");
   }
 
   // === Выдаём привилегию через HyRCON ===
@@ -62,11 +58,12 @@ app.post("/robokassa/result", async (req, res) => {
       password: HYRCON_PASS,
     });
 
+    // Замени на свою команду для Hytale (пример с LuckPerms-подобным плагином)
     const command = `lp user ${shp_nick} parent add ${shp_rank}`;
     await rcon.send(command);
-    await rcon.end();
 
-    res.send("OK" + InvId); // Робокасса требует ответ в формате OK<InvId>
+    await rcon.end();
+    res.send("OK"); // обязательно для RoboKassa
   } catch (e) {
     console.error(e);
     res.status(500).send("rcon error");
